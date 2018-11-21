@@ -1,0 +1,94 @@
+= shstash
+
+Start an interactive shell in an ephemeral directory.
+
+
+== Installation
+
+Requires Go 1.11 or later.
+
+----
+go get -u github.com/saj/shstash
+----
+
+
+== Usage
+
+Invoke `shstash` with no arguments to start a new interactive shell:
+
+----
+% shstash
+% pwd
+/private/var/tmp/shstash-015562507
+----
+
+Arguments to `shstash` will be passed through to the shell verbatim:
+
+----
+% shstash -c pwd
+/private/var/tmp/shstash-191251959
+----
+
+Shell selection is influenced by the values of the `SHSTASH_SHELL` and `SHELL` environment variables.  `SHSTASH_SHELL` need not be a true shell.  The value of the `PATH` environment variable is used to resolve non-absolute paths.
+
+----
+% SHSTASH_SHELL=pwd shstash
+/private/var/tmp/shstash-102865235
+----
+
+----
+% SHSTASH_SHELL=python shstash -c 'import os; print(os.getcwd())'
+/private/var/tmp/shstash-038481734
+----
+
+
+== Properties
+
+The ephemeral directory is removed after the shell terminates:
+
+----
+% echo $SHLVL
+1
+% shstash -c 'echo $SHLVL && pwd'
+2
+/private/var/tmp/shstash-613225361
+% stat /private/var/tmp/shstash-613225361
+stat: /private/var/tmp/shstash-613225361: stat: No such file or directory
+----
+
+Ephemeral directories are created beneath `/var/tmp`.  On many Unix-like operating systems, this directory is not subject to automatic time-based cleanup, which can be a useful property when conducting long-running experiments on scratch data.
+
+The shell is terminated, and the ephemeral directory is removed, following the receipt of `SIGINT`, `SIGTERM`, or `SIGQUIT`:
+
+----
+% shstash -c 'pwd && mkfifo foo && cat foo' & ; pid=$! ; sleep 3 ; kill $pid
+[1] 47812
+/private/var/tmp/shstash-676656683
+%
+[1]  + exit 255   shstash -c 'pwd && mkfifo foo && cat foo'
+% stat /private/var/tmp/shstash-676656683
+stat: /private/var/tmp/shstash-676656683: stat: No such file or directory
+----
+
+Signals are translated as follows:
+
+|===
+|`shstash` is signalled with |`shstash` signals shell with
+
+| `SIGINT`
+| `SIGTERM`
+
+| `SIGTERM`
+| `SIGTERM`
+
+| `SIGQUIT`
+| `SIGKILL`
+|===
+
+Shell exit status is propagated:
+
+----
+% shstash -c 'exit 123'
+% echo $?
+123
+----
