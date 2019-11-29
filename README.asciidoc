@@ -54,7 +54,12 @@ The ephemeral directory is removed after the shell terminates:
 stat: /private/var/tmp/shstash-613225361: stat: No such file or directory
 ----
 
-Ephemeral directories are created beneath `/var/tmp`.  On many Unix-like operating systems, this directory is not subject to automatic time-based cleanup, which can be a useful property when conducting long-running experiments on scratch data.
+Ephemeral directories are created beneath `/var/tmp` by default.  On many Unix-like operating systems, this directory is not subject to automatic time-based cleanup, which can be a useful property when conducting long-running experiments on scratch data.  An alternative root directory, which must already exist, may be specified with `SHSTASH_ROOT`:
+
+----
+% SHSTASH_ROOT=~/stash shstash -c pwd
+/Users/saj/stash/shstash-023063755
+----
 
 The shell is terminated, and the ephemeral directory is removed, following the receipt of `SIGINT`, `SIGTERM`, or `SIGQUIT`:
 
