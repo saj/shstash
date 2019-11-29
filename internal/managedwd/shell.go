@@ -1,11 +1,11 @@
 package managedwd
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"sync"
 
-	"github.com/pkg/errors"
 	"golang.org/x/sys/unix"
 )
 
@@ -45,11 +45,11 @@ func (s *shell) Start() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.wd != nil {
-		return errors.Wrap(errors.New("cmd already started"), "managedwd")
+		return errors.New("cmd already started")
 	}
 	wd, err := NewWorkdir()
 	if err != nil {
-		return errors.Wrap(err, "managedwd")
+		return err
 	}
 	s.wd = wd
 	s.cmd.Dir = wd.Name()
@@ -60,14 +60,14 @@ func (s *shell) Wait() (err error) {
 	s.mu.Lock()
 	if s.wd == nil {
 		s.mu.Unlock()
-		return errors.Wrap(errors.New("cmd not started"), "managedwd")
+		return errors.New("cmd not started")
 	}
 	s.mu.Unlock()
 
 	defer func() {
 		cleanupError := s.wd.Cleanup()
 		if err == nil {
-			err = errors.Wrap(cleanupError, "managedwd")
+			err = cleanupError
 		}
 	}()
 	err = s.cmd.Wait()
@@ -77,7 +77,7 @@ func (s *shell) Wait() (err error) {
 func (s *shell) Terminate() error {
 	p := s.cmd.Process
 	if p == nil {
-		return errors.Wrap(errors.New("cmd not started"), "managedwd")
+		return errors.New("cmd not started")
 	}
 	return p.Signal(unix.SIGTERM)
 }
@@ -85,7 +85,7 @@ func (s *shell) Terminate() error {
 func (s *shell) Kill() error {
 	p := s.cmd.Process
 	if p == nil {
-		return errors.Wrap(errors.New("cmd not started"), "managedwd")
+		return errors.New("cmd not started")
 	}
 	return p.Kill()
 }
