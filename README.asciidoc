@@ -5,8 +5,6 @@ Start an interactive shell in an ephemeral directory.
 
 == Installation
 
-Requires Go 1.11 or later.
-
 ----
 go get -u github.com/saj/shstash
 ----
