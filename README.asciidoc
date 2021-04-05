@@ -1,18 +1,6 @@
-= shstash
-
 Start an interactive shell in an ephemeral directory.
 
-
-== Installation
-
-----
-go get -u github.com/saj/shstash
-----
-
-
-== Usage
-
-Invoke `shstash` with no arguments to start a new interactive shell:
+Invoke `shstash` with no arguments to start a new interactive shell.
 
 ----
 % shstash
@@ -20,11 +8,33 @@ Invoke `shstash` with no arguments to start a new interactive shell:
 /private/var/tmp/shstash-015562507
 ----
 
-Arguments to `shstash` will be passed through to the shell verbatim:
+Arguments to `shstash` are passed through to the shell.
+
+The ephemeral directory is automatically removed after the shell terminates.
 
 ----
-% shstash -c pwd
-/private/var/tmp/shstash-191251959
+% echo $SHLVL
+1
+% shstash -c 'echo $SHLVL && pwd'
+2
+/private/var/tmp/shstash-613225361
+% stat /private/var/tmp/shstash-613225361
+stat: /private/var/tmp/shstash-613225361: stat: No such file or directory
+----
+
+Ephemeral directories are created beneath `/var/tmp` by default.  On many Unix-like operating systems, the entries beneath this directory are not automatically removed with the passage of time, which can be a useful property when conducting long-running experiments on scratch data.  An alternative root directory, which must already exist, may be specified with `SHSTASH_ROOT`.
+
+----
+% SHSTASH_ROOT=~/stash shstash -c pwd
+/Users/saj/stash/shstash-023063755
+----
+
+Shell exit status is propagated.
+
+----
+% shstash -c 'exit 123'
+% echo $?
+123
 ----
 
 Shell selection is influenced by the values of the `SHSTASH_SHELL` and `SHELL` environment variables.  `SHSTASH_SHELL` need not be a true shell.  The value of the `PATH` environment variable is used to resolve non-absolute paths.
@@ -39,59 +49,16 @@ Shell selection is influenced by the values of the `SHSTASH_SHELL` and `SHELL` e
 /private/var/tmp/shstash-038481734
 ----
 
-
-== Properties
-
-The ephemeral directory is removed after the shell terminates:
-
-----
-% echo $SHLVL
-1
-% shstash -c 'echo $SHLVL && pwd'
-2
-/private/var/tmp/shstash-613225361
-% stat /private/var/tmp/shstash-613225361
-stat: /private/var/tmp/shstash-613225361: stat: No such file or directory
-----
-
-Ephemeral directories are created beneath `/var/tmp` by default.  On many Unix-like operating systems, this directory is not subject to automatic time-based cleanup, which can be a useful property when conducting long-running experiments on scratch data.  An alternative root directory, which must already exist, may be specified with `SHSTASH_ROOT`:
-
-----
-% SHSTASH_ROOT=~/stash shstash -c pwd
-/Users/saj/stash/shstash-023063755
-----
-
-The shell is terminated, and the ephemeral directory is removed, following the receipt of `SIGINT`, `SIGTERM`, or `SIGQUIT`:
+The shell is terminated, and the ephemeral directory is removed, upon receipt of `SIGINT`, `SIGTERM`, or `SIGQUIT`.
 
 ----
 % shstash -c 'pwd && mkfifo foo && cat foo' & ; pid=$! ; sleep 3 ; kill $pid
-[1] 47812
+[1] 98738
 /private/var/tmp/shstash-676656683
 %
-[1]  + exit 255   shstash -c 'pwd && mkfifo foo && cat foo'
+[1]  + exit 143   shstash -c 'pwd && mkfifo foo && cat foo'
 % stat /private/var/tmp/shstash-676656683
 stat: /private/var/tmp/shstash-676656683: stat: No such file or directory
 ----
 
-Signals are translated as follows:
-
-|===
-|`shstash` is signalled with |`shstash` signals shell with
-
-| `SIGINT`
-| `SIGTERM`
-
-| `SIGTERM`
-| `SIGTERM`
-
-| `SIGQUIT`
-| `SIGKILL`
-|===
-
-Shell exit status is propagated:
-
-----
-% shstash -c 'exit 123'
-% echo $?
-123
-----
+`shstash` signals its child with `SIGTERM` upon receipt of `SIGINT` or `SIGTERM`.  `shstash` signals its child with `SIGKILL` upon receipt of `SIGQUIT`.
