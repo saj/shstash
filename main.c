@@ -1,4 +1,5 @@
 #include <dirent.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -22,7 +23,7 @@
 #endif
 
 #ifndef SHSTASH_PATH_LEN_MAX
-#define SHSTASH_PATH_LEN_MAX 256
+#define SHSTASH_PATH_LEN_MAX PATH_MAX
 #endif
 
 typedef struct {
