@@ -82,7 +82,7 @@ die_errnum(int errnum, const char *fmt, ...) {
 
   if (fmt[0] && fmt[strlen(fmt) - 1] == ':') {
     const char *errstr = strerror(errnum);
-    if ((int)errstr == EINVAL) {
+    if (errstr == (char *)EINVAL) {
       fprintf(stderr, " Unknown error: %d\n", errnum);
     } else {
       fprintf(stderr, " %s\n", errstr);
