@@ -1,4 +1,5 @@
 #include <dirent.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -31,17 +32,24 @@ typedef struct {
   const char *const *argv;
 } shell_T;
 
+static void vperr(int errnum, const char *fmt, va_list ap);
+static void perr(int errnum, const char *fmt, ...);
+static void vdie(const char *fmt, va_list ap);
 static void die(const char *fmt, ...);
+static void vdie_errnum(int errnum, const char *fmt, va_list ap);
 static void die_errnum(int errnum, const char *fmt, ...);
 
-static const char *divine_root(void);
-static const char *divine_shell(void);
 static const char *getenv_nonempty(const char *name);
+static void        path_join2(char *buf, size_t sz,                   //
+                              const char *dirname, size_t sz_dirname, //
+                              const char *name, size_t sz_name);      //
+static void        path_resolve(char *restrict buf, size_t sz_buf,    //
+                                const char *restrict name);
 
-static void path_join2(char *buf, size_t sz,                   //
-                       const char *dirname, size_t sz_dirname, //
-                       const char *name, size_t sz_name);      //
-static void mk_tempdir(char *pathbuf, size_t sz);
+static const char *divine_root(void);
+static void        divine_shell(char *buf, size_t sz_buf);
+
+static void mk_tempdir(char *bufpath, size_t sz);
 static void rm_tempdir(const char *path);
 
 static void handle_signal_dummy(int signo);
@@ -56,41 +64,56 @@ static int wait_child(pid_t child_pid);
 static int run_shell(const shell_T *shell);
 
 void
-die(const char *fmt, ...) {
-  va_list ap;
-  va_start(ap, fmt);
+vperr(int errnum, const char *fmt, va_list ap) {
   fprintf(stderr, "shstash: ");
   vfprintf(stderr, fmt, ap);
-  va_end(ap);
-
-  if (fmt[0] && fmt[strlen(fmt) - 1] == ':') {
-    fputc(' ', stderr);
-    perror(NULL);
-  } else {
-    fputc('\n', stderr);
-  }
-  exit(1);
-}
-
-void
-die_errnum(int errnum, const char *fmt, ...) {
-  va_list ap;
-  va_start(ap, fmt);
-  fprintf(stderr, "shstash: ");
-  vfprintf(stderr, fmt, ap);
-  va_end(ap);
 
   if (fmt[0] && fmt[strlen(fmt) - 1] == ':') {
     const char *errstr = strerror(errnum);
     if (errstr == (char *)EINVAL) {
-      fprintf(stderr, " Unknown error: %d\n", errnum);
+      fprintf(stderr, " unknown error: %d\n", errnum);
     } else {
       fprintf(stderr, " %s\n", errstr);
     }
   } else {
     fputc('\n', stderr);
   }
-  exit(1);
+}
+
+void
+perr(int errnum, const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  vperr(errnum, fmt, ap);
+  va_end(ap);
+}
+
+void
+vdie(const char *fmt, va_list ap) {
+  vperr(errno, fmt, ap);
+  exit(EXIT_FAILURE);
+}
+
+void
+die(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  vdie(fmt, ap);
+  va_end(ap);
+}
+
+void
+vdie_errnum(int errnum, const char *fmt, va_list ap) {
+  vperr(errnum, fmt, ap);
+  exit(EXIT_FAILURE);
+}
+
+void
+die_errnum(int errnum, const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  vdie_errnum(errnum, fmt, ap);
+  va_end(ap);
 }
 
 const char *
@@ -99,21 +122,6 @@ getenv_nonempty(const char *name) {
   if (!env) return NULL;
   if (env && !strlen(env)) return NULL;
   return env;
-}
-
-const char *
-divine_root(void) {
-  const char *s;
-  if ((s = getenv_nonempty("SHSTASH_ROOT"))) return s;
-  return SHSTASH_DEFAULT_ROOT;
-}
-
-const char *
-divine_shell(void) {
-  const char *s;
-  if ((s = getenv_nonempty("SHSTASH_SHELL"))) return s;
-  if ((s = getenv_nonempty("SHELL"))) return s;
-  return SHSTASH_DEFAULT_SHELL;
 }
 
 void
@@ -132,14 +140,75 @@ path_join2(char *buf, size_t sz_buf,               //
   buf[n++] = '\0';
 }
 
+// execvp is not async-signal-safe so we do this ourselves.
 void
-mk_tempdir(char *pathbuf, size_t sz) {
+path_resolve(char *restrict buf, size_t sz_buf, const char *restrict name) {
+  char buft[SHSTASH_PATH_LEN_MAX];
+  const char *restrict resolved;
+  size_t lname = strlen(name);
+
+  if (sz_buf < lname + 1) die("path_resolve: undersized buffer");
+  for (int i = 0; i < lname; i++) {
+    if (name[i] == '/') {
+      resolved = name;
+      goto done;
+    }
+  }
+
+  const char *p = getenv_nonempty("PATH");
+  if (sz_buf < strlen(p) + 1) die("path_resolve: undersized buffer");
+  strcpy(buf, p);
+
+  char *next, *last;
+  next = strtok_r(buf, ":", &last);
+  while (next) {
+    path_join2(buft, sizeof(buft), //
+               next, strlen(next), //
+               name, lname);
+    if (!access(buft, X_OK)) {
+      resolved = buft;
+      goto done;
+    }
+    next = strtok_r(NULL, ":", &last);
+  }
+
+  resolved = name; // ¯\_(ツ)_/¯
+
+done:
+  strcpy(buf, resolved);
+}
+
+const char *
+divine_root(void) {
+  const char *s;
+  if ((s = getenv_nonempty("SHSTASH_ROOT"))) return s;
+  return SHSTASH_DEFAULT_ROOT;
+}
+
+void
+divine_shell(char *buf, size_t sz_buf) {
+  const char *s = SHSTASH_DEFAULT_SHELL;
+  const char *st;
+  if ((st = getenv_nonempty("SHSTASH_SHELL"))) {
+    s = st;
+    goto resolve;
+  }
+  if ((st = getenv_nonempty("SHELL"))) {
+    s = st;
+    goto resolve;
+  }
+resolve:
+  path_resolve(buf, sz_buf, s);
+}
+
+void
+mk_tempdir(char *bufpath, size_t sz) {
   const char *root = divine_root();
-  path_join2(pathbuf, sz,        //
+  path_join2(bufpath, sz,        //
              root, strlen(root), //
              SHSTASH_BASENAME_TEMPLATE, strlen(SHSTASH_BASENAME_TEMPLATE));
   errno = 0;
-  if (!mkdtemp(pathbuf)) die("mkdtemp:");
+  if (!mkdtemp(bufpath)) die("mkdtemp:");
 }
 
 void
@@ -268,41 +337,56 @@ done:
 
 int
 run_shell(const shell_T *shell) {
-  int rc = 0;
+  int pwd;
+  errno = 0;
+  if ((pwd = open(".", O_RDONLY)) == -1) die("open .:");
+
+  errno = 0;
+  if (chdir(shell->dir_path)) die("chdir: %s:", shell->dir_path);
 
   pid_t pid;
+  int   rc;
   errno = 0;
-  pid   = fork();
-
-  if (pid == -1) die("fork:");
+  pid   = vfork();
+  if (pid == -1) die("vfork:");
   if (pid == 0) {
     sigprocmask_zero();
-
     errno = 0;
-    if (chdir(shell->dir_path)) die("chdir: %s:", shell->dir_path);
-
-    errno = 0;
-    execvp(shell->argv[0], (char *const *)shell->argv);
-    die("exec: %s:", shell->argv[0]);
+    // execv is async-signal-safe in POSIX.1-2008
+    execv(shell->argv[0], (char *const *)shell->argv);
+    _exit(EXIT_FAILURE);
+  }
+  if (errno) { // from execv; child shares our address space
+    perr(errno, "exec: %s:", shell->argv[0]);
+    waitpid(pid, NULL, 0);
+    rc = EXIT_FAILURE;
   } else {
     rc = wait_child(pid);
   }
+
+  errno = 0;
+  if (fchdir(pwd)) die("fchdir .:");
+  close(pwd);
+
   return rc;
 }
+
+char buftmpdir[SHSTASH_PATH_LEN_MAX];
+char bufshell[SHSTASH_PATH_LEN_MAX];
 
 int
 main(int argc, char *argv[]) {
   sigprocmask_block((int[]){SIGINT, SIGQUIT, SIGTERM}, 3);
 
-  char tempdir_buf[SHSTASH_PATH_LEN_MAX];
-  mk_tempdir(tempdir_buf, sizeof(tempdir_buf));
+  mk_tempdir(buftmpdir, sizeof(buftmpdir));
 
-  argv[0] = (char *)divine_shell();
+  divine_shell(bufshell, sizeof(bufshell));
+  argv[0] = bufshell;
   int rc  = run_shell(&(const shell_T){
-      .dir_path = tempdir_buf,
+      .dir_path = buftmpdir,
       .argv     = (const char *const *)argv,
   });
 
-  rm_tempdir(tempdir_buf);
+  rm_tempdir(buftmpdir);
   exit(rc);
 }
