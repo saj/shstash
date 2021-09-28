@@ -1,6 +1,5 @@
 #include <dirent.h>
 #include <fcntl.h>
-#include <limits.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -10,6 +9,8 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+#include "thirdparty/sds/sds.h"
 
 #ifndef SHSTASH_DEFAULT_SHELL
 #define SHSTASH_DEFAULT_SHELL "/bin/sh"
@@ -21,10 +22,6 @@
 
 #ifndef SHSTASH_BASENAME_TEMPLATE
 #define SHSTASH_BASENAME_TEMPLATE "shstash-XXXXXXXX"
-#endif
-
-#ifndef SHSTASH_PATH_LEN_MAX
-#define SHSTASH_PATH_LEN_MAX PATH_MAX
 #endif
 
 typedef struct {
@@ -40,17 +37,13 @@ static void vdie_errnum(int errnum, const char *fmt, va_list ap);
 static void die_errnum(int errnum, const char *fmt, ...);
 
 static const char *getenv_nonempty(const char *name);
-static void        path_join2(char *buf, size_t sz,                   //
-                              const char *dirname, size_t sz_dirname, //
-                              const char *name, size_t sz_name);      //
-static void        path_resolve(char *restrict buf, size_t sz_buf,    //
-                                const char *restrict name);
+void               path_resolve(sds *restrict p, const char *restrict name);
 
-static const char *divine_root(void);
-static void        divine_shell(char *buf, size_t sz_buf);
+static void divine_root(sds *p);
+static void divine_shell(sds *p);
 
-static void mk_tempdir(char *bufpath, size_t sz);
-static void rm_tempdir(const char *path);
+static void mk_tempdir(sds *p);
+static void rm_rf(const char *p);
 
 static void handle_signal_dummy(int signo);
 static void sigset_add(sigset_t *set, int sigs[], size_t sz);
@@ -124,134 +117,120 @@ getenv_nonempty(const char *name) {
   return env;
 }
 
-void
-path_join2(char *buf, size_t sz_buf,               //
-           const char *dirname, size_t sz_dirname, //
-           const char *name, size_t sz_name) {
-  if (sz_buf < (sz_dirname + sz_name + //
-                1 +                    // path separator
-                1))                    // terminator
-    die("path_join2: undersized buffer");
-  memcpy(buf, dirname, sz_dirname);
-  size_t n = sz_dirname;
-  buf[n++] = '/';
-  memcpy(buf + n, name, sz_name);
-  n += sz_name;
-  buf[n++] = '\0';
-}
-
 // execvp is not async-signal-safe so we do this ourselves.
 void
-path_resolve(char *restrict buf, size_t sz_buf, const char *restrict name) {
-  char buft[SHSTASH_PATH_LEN_MAX];
-  const char *restrict resolved;
+path_resolve(sds *restrict p, const char *restrict name) {
   size_t lname = strlen(name);
-
-  if (sz_buf < lname + 1) die("path_resolve: undersized buffer");
   for (int i = 0; i < lname; i++) {
     if (name[i] == '/') {
-      resolved = name;
-      goto done;
+      sdsclear(*p);
+      *p = sdscat(*p, name);
+      return;
     }
   }
 
-  const char *p = getenv_nonempty("PATH");
-  if (sz_buf < strlen(p) + 1) die("path_resolve: undersized buffer");
-  strcpy(buf, p);
+  const char *env = getenv_nonempty("PATH");
 
-  char *next, *last;
-  next = strtok_r(buf, ":", &last);
-  while (next) {
-    path_join2(buft, sizeof(buft), //
-               next, strlen(next), //
-               name, lname);
-    if (!access(buft, X_OK)) {
-      resolved = buft;
-      goto done;
-    }
-    next = strtok_r(NULL, ":", &last);
+  int  npaths;
+  sds *paths;
+  paths = sdssplitlen(env, strlen(env), ":", 1, &npaths);
+  for (int i = 0; i < npaths; i++) {
+    sdsclear(*p);
+    *p = sdscatsds(*p, paths[i]);
+    *p = sdscat(*p, "/");
+    *p = sdscat(*p, name);
+    if (access(*p, X_OK)) continue;
+    sdsfreesplitres(paths, npaths);
+    return;
   }
+  sdsfreesplitres(paths, npaths);
 
-  resolved = name; // ¯\_(ツ)_/¯
-
-done:
-  strcpy(buf, resolved);
-}
-
-const char *
-divine_root(void) {
-  const char *s;
-  if ((s = getenv_nonempty("SHSTASH_ROOT"))) return s;
-  return SHSTASH_DEFAULT_ROOT;
+  sdsclear(*p);
+  *p = sdscat(*p, name); // ¯\_(ツ)_/¯
 }
 
 void
-divine_shell(char *buf, size_t sz_buf) {
-  const char *s = SHSTASH_DEFAULT_SHELL;
-  const char *st;
-  if ((st = getenv_nonempty("SHSTASH_SHELL"))) {
-    s = st;
+divine_root(sds *p) {
+  const char *s = SHSTASH_DEFAULT_ROOT, *t;
+  if ((t = getenv_nonempty("SHSTASH_ROOT"))) s = t;
+  sdsclear(*p);
+  *p = sdscat(*p, s);
+}
+
+void
+divine_shell(sds *p) {
+  const char *s = SHSTASH_DEFAULT_SHELL, *t;
+  if ((t = getenv_nonempty("SHSTASH_SHELL"))) {
+    s = t;
     goto resolve;
   }
-  if ((st = getenv_nonempty("SHELL"))) {
-    s = st;
+  if ((t = getenv_nonempty("SHELL"))) {
+    s = t;
     goto resolve;
   }
 resolve:
-  path_resolve(buf, sz_buf, s);
+  path_resolve(p, s);
 }
 
 void
-mk_tempdir(char *bufpath, size_t sz) {
-  const char *root = divine_root();
-  path_join2(bufpath, sz,        //
-             root, strlen(root), //
-             SHSTASH_BASENAME_TEMPLATE, strlen(SHSTASH_BASENAME_TEMPLATE));
+mk_tempdir(sds *p) {
+  divine_root(p);
+  *p    = sdscat(*p, "/" SHSTASH_BASENAME_TEMPLATE);
   errno = 0;
-  if (!mkdtemp(bufpath)) die("mkdtemp:");
+  if (!mkdtemp(*p)) die("mkdtemp:");
 }
 
 void
-rm_tempdir(const char *path) {
-  DIR *dirp;
+rm_rf_in(sds *p) {
+  size_t lp = sdslen(*p);
+
+  DIR *d;
   errno = 0;
-  dirp  = opendir(path);
-  if (!dirp) {
+  d     = opendir(*p);
+  if (!d) {
     if (errno == ENOENT) return;
-    die("opendir: %s:", path);
+    die("opendir: %s:", *p);
   }
 
   for (;;) {
-    struct dirent *dirent;
+    sdsrange(*p, 0, lp);
+
+    struct dirent *de;
     errno = 0;
-    if (!(dirent = readdir(dirp))) {
-      if (errno) die("readdir: %s", path);
+    if (!(de = readdir(d))) {
+      if (errno) die("readdir: %s", *p);
       break;
     }
 
-    const char *d_name = dirent->d_name;
-    if (d_name[0] == '.') {
-      if (d_name[1] == '\0') continue;
-      if (d_name[1] == '.' && d_name[2] == '\0') continue;
+    const char *dn = de->d_name;
+    if (dn[0] == '.') {
+      if (dn[1] == '\0') continue;
+      if (dn[1] == '.' && dn[2] == '\0') continue;
     }
+    *p = sdscat(*p, "/");
+    *p = sdscat(*p, dn);
 
-    char d_path[SHSTASH_PATH_LEN_MAX];
-    path_join2(d_path, sizeof(d_path), //
-               path, strlen(path),     //
-               d_name, strlen(d_name));
-
-    struct stat d_stat;
+    struct stat ds;
     errno = 0;
-    if (lstat(d_path, &d_stat)) die("lstat: %s:", d_path);
-    if (d_stat.st_mode & S_IFDIR) {
-      rm_tempdir(d_path);
+    if (lstat(*p, &ds)) die("lstat: %s:", *p);
+    if (!(ds.st_mode & S_IFDIR)) {
+      if (unlink(*p)) die("unlink: %s:", *p);
       continue;
     }
-    if (unlink(d_path)) die("unlink: %s:", d_path);
+    rm_rf_in(p);
   }
 
-  closedir(dirp);
-  if (rmdir(path)) die("rmdir: %s:", path);
+  closedir(d);
+  sdsrange(*p, 0, lp);
+  if (rmdir(*p)) die("rmdir: %s:", *p);
+}
+
+void
+rm_rf(const char *p) {
+  sds sp = sdsnewcap(2 * strlen(p));
+  sp     = sdscat(sp, p);
+  rm_rf_in(&sp);
+  sdsfree(sp);
 }
 
 // Dummy handler used to change our disposition toward SIG_IGN'd signals.
@@ -371,22 +350,21 @@ run_shell(const shell_T *shell) {
   return rc;
 }
 
-char buftmpdir[SHSTASH_PATH_LEN_MAX];
-char bufshell[SHSTASH_PATH_LEN_MAX];
-
 int
 main(int argc, char *argv[]) {
   sigprocmask_block((int[]){SIGINT, SIGQUIT, SIGTERM}, 3);
 
-  mk_tempdir(buftmpdir, sizeof(buftmpdir));
+  sds tempdir = sdsnewcap(127);
+  mk_tempdir(&tempdir);
 
-  divine_shell(bufshell, sizeof(bufshell));
-  argv[0] = bufshell;
+  sds shell = sdsnewcap(127);
+  divine_shell(&shell);
+  argv[0] = shell;
   int rc  = run_shell(&(const shell_T){
-      .dir_path = buftmpdir,
+      .dir_path = tempdir,
       .argv     = (const char *const *)argv,
   });
 
-  rm_tempdir(buftmpdir);
+  rm_rf(tempdir);
   exit(rc);
 }
